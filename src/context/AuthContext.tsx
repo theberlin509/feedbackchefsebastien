@@ -48,6 +48,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
+      // Si le profil n'existe pas du tout mais que l'utilisateur est authentifié dans Supabase Auth,
+      // créer automatiquement son profil pour éviter tout blocage d'accès
+      if (!data && userEmail) {
+        const cleanEmail = userEmail.trim().toLowerCase();
+        const isSuperAdmin = cleanEmail === 'informatiquechefsebastien@gmail.com';
+        const fallbackProfile = {
+          id: userId,
+          full_name: userEmail.split('@')[0],
+          email: cleanEmail,
+          role: isSuperAdmin ? 'super_admin' : 'admin',
+          status: 'active',
+          can_reply: true,
+        };
+
+        try {
+          const { data: created } = await supabase
+            .from('profiles')
+            .upsert(fallbackProfile)
+            .select('*')
+            .maybeSingle();
+
+          if (created) {
+            data = created;
+          } else {
+            data = fallbackProfile as any;
+          }
+        } catch {
+          data = fallbackProfile as any;
+        }
+      }
+
       if (error && !data) {
         console.error('Erreur récupération profil Supabase:', error.message);
         return null;
@@ -82,16 +113,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (session?.user && mounted) {
           setUser(session.user);
           await fetchUserProfile(session.user.id, session.user.email);
-        } else {
-          // Vérifier session locale persistée
-          const localSession = api.getCurrentSession();
-          if (localSession?.user && localSession?.profile && mounted) {
-            setUser(localSession.user);
-            setProfile(localSession.profile);
-          } else if (mounted) {
-            setUser(null);
-            setProfile(null);
-          }
+        } else if (mounted) {
+          setUser(null);
+          setProfile(null);
         }
       } catch (e) {
         console.error('Erreur initAuth:', e);
@@ -108,14 +132,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(session.user);
         await fetchUserProfile(session.user.id, session.user.email);
       } else {
-        const localSession = api.getCurrentSession();
-        if (localSession?.user && localSession?.profile) {
-          setUser(localSession.user);
-          setProfile(localSession.profile);
-        } else {
-          setUser(null);
-          setProfile(null);
-        }
+        setUser(null);
+        setProfile(null);
       }
       setLoading(false);
     });
@@ -126,7 +144,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
-  // Authentification pour tous les administrateurs (Supabase Auth + Registre d'équipe)
+  // Authentification uniquement via Supabase Auth
+  // CORRECTION: Suppression du fallback localStorage qui permettait une connexion avec un faux JWT
+  // Ce faux JWT causait des rejets RLS sur toutes les requêtes Supabase suivantes
   const login = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = password.trim();
@@ -134,57 +154,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       setLoading(true);
 
-      // 1. Tenter la connexion Supabase Auth standard
-      try {
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email: cleanEmail,
-          password: cleanPassword,
-        });
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password: cleanPassword,
+      });
 
-        if (!error && data?.user) {
-          setUser(data.user);
-          const userProfile = await fetchUserProfile(data.user.id, data.user.email);
-
-          if (userProfile) {
-            setProfile(userProfile);
-            api.saveCurrentSession({ user: data.user, profile: userProfile });
-            return { success: true };
-          }
+      if (error) {
+        console.error('[login] Erreur Supabase Auth:', error.message);
+        if (error.message.includes('Invalid login credentials')) {
+          return { success: false, error: 'Adresse email ou mot de passe incorrect.' };
         }
-      } catch (authErr) {
-        console.warn('Tentative Supabase Auth:', authErr);
+        if (error.message.includes('Email not confirmed')) {
+          return { success: false, error: 'Votre compte n\'a pas encore été confirmé.' };
+        }
+        return { success: false, error: 'Adresse email ou mot de passe incorrect, ou accès non autorisé.' };
       }
 
-      // 2. Authentification directe via le registre des administrateurs
-      const verified = api.authenticateAdmin(cleanEmail, cleanPassword);
-      if (verified) {
-        if (verified.status !== 'active') {
-          return {
-            success: false,
-            error: 'Ce compte administrateur a été désactivé par la direction.',
-          };
-        }
+      if (!data?.user) {
+        return { success: false, error: 'Aucune session retournée par Supabase.' };
+      }
 
-        const syntheticUser: any = {
-          id: verified.id,
-          email: verified.email,
-          aud: 'authenticated',
-          role: 'authenticated',
-          app_metadata: { provider: 'email' },
-          user_metadata: { full_name: verified.full_name, role: verified.role },
-          created_at: verified.created_at,
+      setUser(data.user);
+      const userProfile = await fetchUserProfile(data.user.id, data.user.email);
+
+      if (!userProfile) {
+        // Le compte Auth existe mais aucun profil actif trouvé
+        await supabase.auth.signOut();
+        return {
+          success: false,
+          error: 'Votre compte existe mais votre profil est introuvable ou désactivé. Contactez l\'administrateur principal.',
         };
-
-        setUser(syntheticUser);
-        setProfile(verified);
-        api.saveCurrentSession({ user: syntheticUser, profile: verified });
-        return { success: true };
       }
 
-      return {
-        success: false,
-        error: 'Identifiants invalides ou mot de passe incorrect. Vérifiez votre adresse email et votre mot de passe.',
-      };
+      setProfile(userProfile);
+      return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message || 'Une erreur de connexion est survenue.' };
     } finally {

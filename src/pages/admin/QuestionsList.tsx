@@ -8,6 +8,7 @@ import {
   ExternalLink,
   ShieldAlert,
   Calendar,
+  Trash2,
 } from 'lucide-react';
 import { api } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -25,6 +26,7 @@ export const QuestionsList: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [activeFilter, setActiveFilter] = useState<'all' | 'received' | 'replied'>('all');
   const [actionError, setActionError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadData = async () => {
     try {
@@ -44,6 +46,26 @@ export const QuestionsList: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  const handleDeleteQuestion = async (id: string) => {
+    if (deletingId) return;
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer cette question ?')) return;
+
+    setDeletingId(id);
+    setActionError(null);
+    try {
+      const ok = await api.deleteQuestion(id);
+      if (ok) {
+        setQuestions((prev) => prev.filter((q) => q.id !== id));
+      } else {
+        setActionError('Échec de la suppression de la question dans Supabase.');
+      }
+    } catch (err: any) {
+      setActionError(`Erreur lors de la suppression : ${err.message || 'Échec API'}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   // Compteurs exacts demandés
   const countAll = questions.length;
@@ -273,8 +295,8 @@ export const QuestionsList: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Unique Bouton Principal [ Répondre ] */}
-                  <div>
+                  {/* Boutons d'Action: Répondre + Supprimer */}
+                  <div className="flex items-center gap-2">
                     {canReply ? (
                       <button
                         type="button"
@@ -306,6 +328,16 @@ export const QuestionsList: React.FC = () => {
                         <span>Répondre (désactivé)</span>
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteQuestion(q.id)}
+                      disabled={deletingId === q.id}
+                      className="inline-flex items-center justify-center p-2.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs font-semibold transition-all active:scale-95 disabled:opacity-50"
+                      title="Supprimer cette question"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
               </div>

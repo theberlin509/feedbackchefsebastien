@@ -75,7 +75,7 @@ export const SettingsPage: React.FC = () => {
     try {
       const updated = await api.updateSettings(settings);
       setSettings(updated);
-      setSuccessMsg('Paramètres enregistrés avec succès !');
+      setSuccessMsg('✓ Paramètres enregistrés et persistés dans Supabase avec succès !');
       setTimeout(() => setSuccessMsg(null), 4000);
     } catch (err: any) {
       setErrorMsg(err.message || 'Erreur lors de l’enregistrement des paramètres.');

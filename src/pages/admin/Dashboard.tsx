@@ -11,6 +11,7 @@ import {
   Calendar,
   Sparkles,
   Phone,
+  Trash2,
 } from 'lucide-react';
 import { api } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -45,6 +46,16 @@ export const AdminDashboard: React.FC = () => {
   useEffect(() => {
     loadDashboardData();
   }, []);
+
+  const handleDeleteQuestion = async (id: string) => {
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer cette question ?')) return;
+    try {
+      await api.deleteQuestion(id);
+      setQuestionsList((prev) => prev.filter((q) => q.id !== id));
+    } catch (err) {
+      console.error('Erreur suppression question:', err);
+    }
+  };
 
   // Calcul des statistiques
   const totalFeedback = feedbackList.length;
@@ -293,20 +304,31 @@ export const AdminDashboard: React.FC = () => {
                       })}
                     </span>
 
-                    {canReply ? (
+                    <div className="flex items-center gap-1.5">
+                      {canReply ? (
+                        <button
+                          type="button"
+                          onClick={() => handleQuickReply(q)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-all active:scale-95 shadow-xs"
+                        >
+                          <Phone className="w-3.5 h-3.5" />
+                          <span>Répondre WhatsApp</span>
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-stone-400 italic">
+                          Lecture seule
+                        </span>
+                      )}
+
                       <button
                         type="button"
-                        onClick={() => handleQuickReply(q)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-all active:scale-95 shadow-xs"
+                        onClick={() => handleDeleteQuestion(q.id)}
+                        className="inline-flex items-center justify-center p-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 text-xs transition-all active:scale-95"
+                        title="Supprimer la question"
                       >
-                        <Phone className="w-3.5 h-3.5" />
-                        <span>Répondre WhatsApp</span>
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
-                    ) : (
-                      <span className="text-[11px] text-stone-400 italic">
-                        Lecture seule
-                      </span>
-                    )}
+                    </div>
                   </div>
                 </div>
               ))}

@@ -109,27 +109,33 @@ export const api = {
   },
 
   // Mettre à jour les paramètres (Super Admin)
+  // CORRECTION: propage l'erreur Supabase au lieu de tomber silencieusement en fallback localStorage
   async updateSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
     const current = await this.getSettings();
     const updated = { ...current, ...settings, updated_at: new Date().toISOString() };
 
-    try {
-      const { data, error } = await supabase
-        .from('settings')
-        .upsert({ id: 1, ...updated })
-        .select()
-        .single();
+    const { data, error } = await supabase
+      .from('settings')
+      .upsert({ id: 1, ...updated })
+      .select()
+      .single();
 
-      if (!error && data) {
-        setLocalData(LOCAL_STORAGE_KEYS.SETTINGS, data);
-        return data as AppSettings;
-      }
-    } catch {
-      // mode fallback
+    if (error) {
+      console.error('[updateSettings] Erreur Supabase:', error.message, error.code);
+      throw new Error(
+        error.code === '42501'
+          ? 'Permission refusée : seul le Super Admin peut modifier les paramètres.'
+          : `Erreur lors de la sauvegarde dans Supabase : ${error.message}`
+      );
     }
 
-    setLocalData(LOCAL_STORAGE_KEYS.SETTINGS, updated);
-    return updated;
+    if (!data) {
+      throw new Error('La sauvegarde a réussi mais Supabase n\'a pas retourné les données.');
+    }
+
+    // Mettre en cache local uniquement APRÈS confirmation Supabase
+    setLocalData(LOCAL_STORAGE_KEYS.SETTINGS, data);
+    return data as AppSettings;
   },
 
   // Récupérer les services actifs
@@ -584,114 +590,116 @@ export const api = {
     return false;
   },
 
-  // Récupérer la liste des administrateurs (Super Admin)
-  async getAdminsList(): Promise<Profile[]> {
-    const localAccounts = getLocalData<AdminAccount[]>(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, []);
-    let dbProfiles: Profile[] = [];
-
+  // Supprimer une question WhatsApp (Admin)
+  async deleteQuestion(questionId: string): Promise<boolean> {
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .order('created_at', { ascending: false });
+      // 1. Tenter la suppression via RPC delete_question
+      const { error: rpcErr } = await supabase.rpc('delete_question', {
+        question_id: questionId,
+      });
 
-      if (!error && data) {
-        dbProfiles = data as Profile[];
+      if (!rpcErr) {
+        const list = getLocalData<Question[]>(LOCAL_STORAGE_KEYS.QUESTIONS, []);
+        setLocalData(
+          LOCAL_STORAGE_KEYS.QUESTIONS,
+          list.filter((q) => q.id !== questionId)
+        );
+        return true;
       }
-    } catch {}
 
-    // Fusionner pour garantir que tous les comptes créés sont toujours visibles et administrables
-    const map = new Map<string, Profile>();
+      // 2. Fallback via DELETE direct RLS Supabase
+      const { error: deleteErr } = await supabase
+        .from('questions')
+        .delete()
+        .eq('id', questionId);
 
-    // Compte principal Direction toujours présent
-    map.set('informatiquechefsebastien@gmail.com', {
-      id: 'super-admin-direction',
-      full_name: 'Chef Sébastien (Direction)',
-      email: 'informatiquechefsebastien@gmail.com',
-      role: 'super_admin',
-      status: 'active',
-      can_reply: true,
-      created_at: '2026-10-04T00:00:00.000Z',
-      updated_at: new Date().toISOString(),
-    });
-
-    dbProfiles.forEach(p => {
-      if (p.email) map.set(p.email.toLowerCase(), p);
-    });
-
-    localAccounts.forEach(a => {
-      const existing = map.get(a.email.toLowerCase());
-      if (existing) {
-        map.set(a.email.toLowerCase(), {
-          ...existing,
-          role: a.role,
-          status: a.status,
-          can_reply: a.can_reply,
-          full_name: a.full_name || existing.full_name,
-        });
-      } else {
-        map.set(a.email.toLowerCase(), {
-          id: a.id,
-          full_name: a.full_name,
-          email: a.email,
-          role: a.role,
-          status: a.status,
-          can_reply: a.can_reply,
-          created_at: a.created_at,
-          updated_at: a.updated_at,
-        });
+      if (!deleteErr) {
+        const list = getLocalData<Question[]>(LOCAL_STORAGE_KEYS.QUESTIONS, []);
+        setLocalData(
+          LOCAL_STORAGE_KEYS.QUESTIONS,
+          list.filter((q) => q.id !== questionId)
+        );
+        return true;
       }
-    });
 
-    return Array.from(map.values());
+      throw new Error(deleteErr.message);
+    } catch (err: any) {
+      console.error('Erreur suppression question:', err);
+      const list = getLocalData<Question[]>(LOCAL_STORAGE_KEYS.QUESTIONS, []);
+      setLocalData(
+        LOCAL_STORAGE_KEYS.QUESTIONS,
+        list.filter((q) => q.id !== questionId)
+      );
+      return false;
+    }
+  },
+
+  // Récupérer la liste des administrateurs (Super Admin)
+  // CORRECTION: lecture uniquement depuis Supabase — le merge avec localStorage causait la réapparition des admins supprimés
+  async getAdminsList(): Promise<Profile[]> {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('[getAdminsList] Erreur Supabase:', error.message);
+      throw new Error(`Impossible de charger la liste des administrateurs : ${error.message}`);
+    }
+
+    return (data || []) as Profile[];
   },
 
   // Mettre à jour un administrateur (rôle, can_reply, status)
+  // CORRECTION: propage l'erreur Supabase, ne maintient plus de double état localStorage
   async updateAdmin(profileId: string, updates: Partial<Profile>): Promise<boolean> {
-    const localAccounts = getLocalData<AdminAccount[]>(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, []);
-    const idx = localAccounts.findIndex(a => a.id === profileId || a.email.toLowerCase() === updates.email?.toLowerCase());
-    if (idx !== -1) {
-      localAccounts[idx] = {
-        ...localAccounts[idx],
-        ...updates,
-        updated_at: new Date().toISOString(),
-      };
-      setLocalData(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, localAccounts);
-    }
+    const updatePayload: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    // Copier uniquement les champs modifiables
+    if (updates.full_name !== undefined) updatePayload.full_name = updates.full_name;
+    if (updates.role !== undefined) updatePayload.role = updates.role;
+    if (updates.can_reply !== undefined) updatePayload.can_reply = updates.can_reply;
+    if (updates.status !== undefined) updatePayload.status = updates.status;
 
-    try {
-      await supabase
-        .from('profiles')
-        .update({
-          ...updates,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', profileId);
-    } catch {}
+    const { error } = await supabase
+      .from('profiles')
+      .update(updatePayload)
+      .eq('id', profileId);
+
+    if (error) {
+      console.error('[updateAdmin] Erreur Supabase:', error.message);
+      throw new Error(`Impossible de mettre à jour le profil : ${error.message}`);
+    }
 
     return true;
   },
 
   // Supprimer un administrateur
-  async deleteAdmin(profileId: string, email?: string): Promise<boolean> {
-    const localAccounts = getLocalData<AdminAccount[]>(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, []);
-    const cleanEmail = email?.trim().toLowerCase();
-    const updated = localAccounts.filter(
-      a => a.id !== profileId && (cleanEmail ? a.email.toLowerCase() !== cleanEmail : true)
-    );
-    setLocalData(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, updated);
+  // CORRECTION: utilise la RPC delete_admin_user qui supprime auth.users + profil atomiquement
+  // Propage l'erreur Supabase au lieu de retourner silencieusement true
+  async deleteAdmin(profileId: string, _email?: string): Promise<boolean> {
+    const { data, error } = await supabase.rpc('delete_admin_user', {
+      target_user_id: profileId,
+    });
 
-    try {
-      await supabase.from('profiles').delete().eq('id', profileId);
-      if (cleanEmail) {
-        await supabase.from('profiles').delete().eq('email', cleanEmail);
-      }
-    } catch {}
+    if (error) {
+      console.error('[deleteAdmin] Erreur Supabase RPC:', error.message);
+      throw new Error(`Erreur lors de la suppression : ${error.message}`);
+    }
 
+    if (data && !data.success) {
+      console.error('[deleteAdmin] RPC refusée:', data.error);
+      throw new Error(data.error || 'La suppression a été refusée par le serveur.');
+    }
+
+    console.log('[deleteAdmin] Succès:', data);
     return true;
   },
 
-  // Créer un administrateur (Enregistrement direct garanti + synchronisation Supabase)
+  // Créer un administrateur
+  // CORRECTION: utilise la RPC create_admin_user qui crée auth.users + profil atomiquement
+  // Le compte Auth est créé avec le bon UUID qui match le profil — plus de faux IDs locaux
   async createAdmin(payload: {
     full_name: string;
     email: string;
@@ -701,103 +709,42 @@ export const api = {
   }): Promise<{ success: boolean; error?: string }> {
     const cleanEmail = payload.email.trim().toLowerCase();
     const cleanName = payload.full_name.trim();
-    const tempPassword = payload.password?.trim() || 'Chef2026!';
-    const newId = `admin-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const adminPassword = payload.password?.trim() || 'Chef2026!';
 
-    // 1. Enregistrement garanti dans le registre local des administrateurs
-    const accounts = getLocalData<AdminAccount[]>(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, []);
-    const existingIndex = accounts.findIndex(a => a.email.toLowerCase() === cleanEmail);
-
-    const record: AdminAccount = {
-      id: existingIndex !== -1 ? accounts[existingIndex].id : newId,
-      email: cleanEmail,
-      password: tempPassword,
-      full_name: cleanName,
-      role: payload.role,
-      status: 'active',
-      can_reply: payload.can_reply,
-      created_at: existingIndex !== -1 ? accounts[existingIndex].created_at : new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    if (existingIndex !== -1) {
-      accounts[existingIndex] = record;
-    } else {
-      accounts.push(record);
+    if (!cleanEmail || !cleanName) {
+      return { success: false, error: 'Email et nom complet sont obligatoires.' };
     }
-    setLocalData(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, accounts);
 
-    // 2. Synchronisation de courtoisie vers Supabase Auth et Profiles en arrière-plan
-    try {
-      const isolatedAuthClient = createClient(supabaseUrl, supabaseAnonKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      });
-      await isolatedAuthClient.auth.signUp({
-        email: cleanEmail,
-        password: tempPassword,
-        options: {
-          data: {
-            full_name: cleanName,
-            role: payload.role,
-            can_reply: payload.can_reply,
-          },
-        },
-      });
-    } catch {}
+    if (adminPassword.length < 6) {
+      return { success: false, error: 'Le mot de passe doit contenir au moins 6 caractères.' };
+    }
 
-    try {
-      await supabase.from('profiles').upsert({
-        id: record.id,
-        full_name: cleanName,
-        email: cleanEmail,
-        role: payload.role,
-        status: 'active',
-        can_reply: payload.can_reply,
-        updated_at: new Date().toISOString(),
-      });
-    } catch {}
+    const { data, error } = await supabase.rpc('create_admin_user', {
+      admin_email: cleanEmail,
+      admin_password: adminPassword,
+      admin_name: cleanName,
+      admin_role: payload.role,
+      admin_can_reply: payload.role === 'super_admin' ? true : payload.can_reply,
+    });
 
+    if (error) {
+      console.error('[createAdmin] Erreur Supabase RPC:', error.message);
+      return { success: false, error: `Erreur Supabase : ${error.message}` };
+    }
+
+    if (data && !data.success) {
+      console.error('[createAdmin] RPC refusée:', data.error);
+      return { success: false, error: data.error || 'La création a été refusée par le serveur.' };
+    }
+
+    console.log('[createAdmin] Succès, user_id:', data?.user_id);
     return { success: true };
   },
 
-  // Authentification directe pour les administrateurs
-  authenticateAdmin(email: string, password: string): Profile | null {
-    const cleanEmail = email.trim().toLowerCase();
-    const cleanPass = password.trim();
-
-    // Compte Super Admin Direction par défaut
-    if (cleanEmail === 'informatiquechefsebastien@gmail.com') {
-      return {
-        id: 'super-admin-direction',
-        full_name: 'Chef Sébastien (Direction)',
-        email: cleanEmail,
-        role: 'super_admin',
-        status: 'active',
-        can_reply: true,
-        created_at: '2026-10-04T00:00:00.000Z',
-        updated_at: new Date().toISOString(),
-      };
-    }
-
-    const accounts = getLocalData<AdminAccount[]>(LOCAL_STORAGE_KEYS.ADMIN_ACCOUNTS, []);
-    const found = accounts.find(a => a.email.toLowerCase() === cleanEmail);
-    if (!found) return null;
-
-    if (found.password && found.password !== cleanPass) {
-      return null;
-    }
-
-    return {
-      id: found.id,
-      full_name: found.full_name,
-      email: found.email,
-      role: found.role,
-      status: found.status,
-      can_reply: found.can_reply,
-      created_at: found.created_at,
-      updated_at: found.updated_at,
-    };
-  },
+  // authenticateAdmin SUPPRIMÉ
+  // CORRECTION: L'authentification doit passer uniquement par Supabase Auth.
+  // Le fallback localStorage permettait une connexion avec un faux JWT (syntheticUser)
+  // qui n'avait aucun token valide → toutes les requêtes Supabase étaient rejetées par RLS.
 
   // Gestion de session sécurisée
   saveCurrentSession(session: { user: any; profile: Profile }): void {
