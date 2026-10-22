@@ -268,7 +268,7 @@ export const api = {
       status: 'pending',
     };
 
-    // Préparer l'objet local immédiatement pour garantir qu'aucun avis n'est perdu
+    // Préparer l'objet pour retour ou secours local
     const services = await this.getAllServices();
     const serviceName = services.find(s => s.id === cleanServiceId || s.id === payload.service_id)?.name || 'Service';
     const newFeedback: Feedback = {
@@ -285,9 +285,7 @@ export const api = {
       updated_at: new Date().toISOString(),
     };
 
-    // Sauvegarde locale systématique
-    const currentList = getLocalData<Feedback[]>(LOCAL_STORAGE_KEYS.FEEDBACK, []);
-    setLocalData(LOCAL_STORAGE_KEYS.FEEDBACK, [newFeedback, ...currentList.filter(f => f.id !== newFeedback.id)]);
+    let supabaseSuccess = false;
 
     try {
       if (payload.image_url) {
@@ -301,6 +299,7 @@ export const api = {
 
         if (!imgErr) {
           console.log('Avis avec image enregistré avec succès dans Supabase !');
+          supabaseSuccess = true;
           return { success: true, data: newFeedback };
         }
 
@@ -315,6 +314,7 @@ export const api = {
 
         if (!retryErr) {
           console.log('Avis enregistré avec succès dans Supabase !');
+          supabaseSuccess = true;
           return { success: true, data: newFeedback };
         } else {
           console.error('Erreur insertion avis Supabase:', retryErr.message);
@@ -327,6 +327,7 @@ export const api = {
 
         if (!error) {
           console.log('Avis enregistré avec succès dans Supabase !');
+          supabaseSuccess = true;
           return { success: true, data: newFeedback };
         } else {
           console.error('Erreur insertion avis Supabase:', error.message);
@@ -334,6 +335,13 @@ export const api = {
       }
     } catch (err: any) {
       console.warn('Exception insert feedback:', err);
+    }
+
+    // Sauvegarde locale de secours UNIQUEMENT si Supabase a échoué (mode hors-ligne)
+    // Cela empêche l'enregistrement en double (Supabase + localStorage)
+    if (!supabaseSuccess) {
+      const currentList = getLocalData<Feedback[]>(LOCAL_STORAGE_KEYS.FEEDBACK, []);
+      setLocalData(LOCAL_STORAGE_KEYS.FEEDBACK, [newFeedback, ...currentList.filter(f => f.id !== newFeedback.id)]);
     }
 
     return { success: true, data: newFeedback };
@@ -414,11 +422,21 @@ export const api = {
           service_name: item.service_id ? (servicesMap[item.service_id] || 'Général') : 'Général',
         }));
 
-        // Fusionner avec la liste locale pour ne jamais perdre un avis récent
-        const map = new Map<string, Feedback>();
-        local.forEach(f => map.set(f.id, f));
-        mapped.forEach(f => map.set(f.id, f));
-        const combined = Array.from(map.values()).sort(
+        // DÉDUPLICATION INTELLIGENTE :
+        // Éliminer tout doublon 'fb-...' local qui existe déjà dans Supabase
+        const pendingLocal = local.filter((l) => {
+          if (!l.id.startsWith('fb-')) return false; // les IDs Supabase sont déjà dans mapped
+          const existsInSupabase = mapped.some(
+            (m) =>
+              m.comment.trim() === l.comment.trim() &&
+              m.rating === l.rating &&
+              (m.customer_phone === l.customer_phone || (!m.customer_phone && !l.customer_phone))
+          );
+          return !existsInSupabase;
+        });
+
+        // Supabase est la source de vérité prioritaire
+        const combined = [...mapped, ...pendingLocal].sort(
           (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         );
 

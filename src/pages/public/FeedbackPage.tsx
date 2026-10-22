@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import confetti from 'canvas-confetti';
 import {
@@ -26,7 +26,11 @@ export const FeedbackPage: React.FC = () => {
   const [customerName, setCustomerName] = useState<string>('');
   const [customerPhone, setCustomerPhone] = useState<string>('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imageSizeText, setImageSizeText] = useState<string | null>(null);
   const [imageUploading, setImageUploading] = useState<boolean>(false);
+
+  // Verrouillage anti-double soumission
+  const isSubmittingRef = useRef<boolean>(false);
 
   // UI state
   const [submitting, setSubmitting] = useState(false);
@@ -54,57 +58,93 @@ export const FeedbackPage: React.FC = () => {
     loadData();
   }, []);
 
-  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Compression d'image ultra-optimisée pour ne jamais encombrer le serveur
+  const compressImage = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('Erreur de lecture du fichier'));
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('Format d’image non supporté'));
+        img.onload = () => {
+          // Résolution max 640px : parfait pour lire tickets, reçus et voir les plats sans surcharger le serveur
+          const MAX_DIM = 640;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_DIM) {
+              height = Math.round((height * MAX_DIM) / width);
+              width = MAX_DIM;
+            }
+          } else {
+            if (height > MAX_DIM) {
+              width = Math.round((width * MAX_DIM) / height);
+              height = MAX_DIM;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            return resolve(event.target?.result as string);
+          }
+
+          ctx.drawImage(img, 0, 0, width, height);
+
+          // Qualité 0.70 pour un équilibre optimal : image nette et poids minime (~30-50 Ko)
+          let quality = 0.70;
+          let dataUrl = canvas.toDataURL('image/jpeg', quality);
+
+          // Si l'image dépasse 80 Ko, compression affinée à 0.55
+          if (dataUrl.length > 80 * 1024) {
+            quality = 0.55;
+            dataUrl = canvas.toDataURL('image/jpeg', quality);
+          }
+
+          resolve(dataUrl);
+        };
+        img.src = event.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 8 * 1024 * 1024) {
-      setErrorMessage('La taille de la photo ne doit pas dépasser 8 Mo.');
+    if (file.size > 15 * 1024 * 1024) {
+      setErrorMessage('La taille de la photo ne doit pas dépasser 15 Mo.');
       return;
     }
 
     setImageUploading(true);
     setErrorMessage(null);
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        // Redimensionner et compresser intelligemment pour préserver performance
-        const canvas = document.createElement('canvas');
-        const MAX_SIZE = 1000;
-        let width = img.width;
-        let height = img.height;
-        if (width > height) {
-          if (width > MAX_SIZE) {
-            height *= MAX_SIZE / width;
-            width = MAX_SIZE;
-          }
-        } else {
-          if (height > MAX_SIZE) {
-            width *= MAX_SIZE / height;
-            height = MAX_SIZE;
-          }
-        }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
-          setImagePreview(dataUrl);
-        } else {
-          setImagePreview(event.target?.result as string);
-        }
-        setImageUploading(false);
-      };
-      img.src = event.target?.result as string;
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressedDataUrl = await compressImage(file);
+      setImagePreview(compressedDataUrl);
+      const approxKb = Math.round((compressedDataUrl.length * 3) / 4 / 1024);
+      setImageSizeText(`~${approxKb} Ko`);
+    } catch (err: any) {
+      console.error('Erreur compression image:', err);
+      setErrorMessage('Impossible de traiter cette image. Veuillez en sélectionner une autre.');
+    } finally {
+      setImageUploading(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Verrouillage immédiat pour empêcher tout double clic
+    if (isSubmittingRef.current || submitting) {
+      return;
+    }
+
     setErrorMessage(null);
 
     // 1. Validation de la note
@@ -145,6 +185,7 @@ export const FeedbackPage: React.FC = () => {
       return;
     }
 
+    isSubmittingRef.current = true;
     setSubmitting(true);
 
     try {
@@ -174,6 +215,7 @@ export const FeedbackPage: React.FC = () => {
       setErrorMessage(err.message || 'Impossible d’enregistrer votre avis pour le moment.');
     } finally {
       setSubmitting(false);
+      isSubmittingRef.current = false;
     }
   };
 
@@ -326,12 +368,15 @@ export const FeedbackPage: React.FC = () => {
                     Photo ajoutée à l'avis
                   </span>
                   <span className="text-[11px] text-emerald-700 font-mono-custom flex items-center gap-1 mt-0.5">
-                    ✓ Justificatif prêt à être envoyé
+                    ✓ Photo prête et optimisée {imageSizeText ? `(${imageSizeText})` : ''}
                   </span>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setImagePreview(null)}
+                  onClick={() => {
+                    setImagePreview(null);
+                    setImageSizeText(null);
+                  }}
                   className="p-2 rounded-lg text-[#6b5b51] hover:text-[#b8000f] hover:bg-[#ffe3e5] transition-colors"
                   title="Supprimer cette photo"
                 >
