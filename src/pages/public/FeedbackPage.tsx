@@ -125,7 +125,13 @@ export const FeedbackPage: React.FC = () => {
       return;
     }
 
-    // 4. Validation du téléphone si obligatoire ou renseigné
+    // 4. Validation de la photo justificative (obligatoire)
+    if (!imagePreview) {
+      setErrorMessage('Veuillez ajouter une image pour que vous puissiez donner votre avis.');
+      return;
+    }
+
+    // 5. Validation du téléphone si obligatoire ou renseigné
     let formattedPhone: string | undefined = undefined;
     if (customerPhone.trim()) {
       const phoneValidation = normalizeHaitiPhone(customerPhone);
@@ -301,11 +307,11 @@ export const FeedbackPage: React.FC = () => {
             />
           </div>
 
-          {/* Option Photo justificative (Optionnel) */}
+          {/* Photo justificative (Obligatoire) */}
           <div>
             <label className="block font-mono-custom text-[11px] font-semibold text-[#6b5b51] uppercase tracking-wider mb-1.5">
-              Photo justificative{' '}
-              <span className="text-stone-400 font-normal lowercase">(facultatif — plat, ticket, reçu)</span>
+              Photo justificative <span className="text-[#ff0316]">*</span>{' '}
+              <span className="text-[#b8000f] font-normal lowercase">(obligatoire — plat, ticket, reçu)</span>
             </label>
 
             {imagePreview ? (
@@ -336,10 +342,10 @@ export const FeedbackPage: React.FC = () => {
               <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-[#d9ccb6] hover:border-[#ff0316] rounded-xl bg-white/70 hover:bg-white cursor-pointer transition-all text-center group">
                 <Camera className="w-6 h-6 text-[#6b5b51] group-hover:text-[#ff0316] mb-1.5 transition-colors" />
                 <span className="text-xs font-semibold text-[#1f1612]">
-                  {imageUploading ? 'Traitement de la photo...' : 'Prendre une photo ou ajouter un justificatif'}
+                  {imageUploading ? 'Traitement de la photo...' : 'Ajouter une image pour que vous puissiez donner votre avis'}
                 </span>
                 <span className="text-[11px] text-[#6b5b51] mt-0.5 font-mono-custom">
-                  Plat, commande, ticket (PNG, JPG)
+                  Requis : plat, ticket ou reçu (PNG, JPG)
                 </span>
                 <input
                   type="file"
